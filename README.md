@@ -296,7 +296,7 @@ flowchart LR
     Unit --> Cache["Save Bazel disk/repository cache"]
     Cache --> Mac["macOS UI integration job"]
     Mac --> Select["Discover installed iOS runtime"]
-    Select --> Prepare["Prepare 3 simulators + test CA"]
+    Select --> Prepare["Prepare 3 simulators + test CA<br/>leave fleet booted"]
     Prepare --> Test["Run 5 methods over 3 shards"]
     Test -->|failure| Artifacts["Upload Bazel logs + XCResult"]
     Test -->|success| Pass["Required check passes"]
@@ -305,6 +305,11 @@ flowchart LR
 No repository secret is required, so forked pull requests can run the checks.
 The UI job restores the cache produced by the unit job, while simulator
 execution stays local to its Mac runner.
+
+The CI preparation step uses `--keep-booted`. Fresh GitHub runners otherwise
+boot every simulator to install the test certificate, shut each one down, and
+immediately cold-boot the whole fleet again inside the Bazel shards. Avoiding
+that redundant cycle is important for modern iOS runtimes on hosted Macs.
 
 The default label is `macos-15`. To use a larger or self-hosted machine, create
 the repository Actions variable `SIMFLEET_MACOS_RUNNER` with the desired runner

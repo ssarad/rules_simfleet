@@ -70,12 +70,14 @@ jobs:
             --count 3 \
             --device-type "$SIMFLEET_DEVICE_TYPE" \
             --os-version "$SIMFLEET_OS_VERSION" \
-            --certificate "$RUNNER_TEMP/simfleet-ci-root.pem"
+            --certificate "$RUNNER_TEMP/simfleet-ci-root.pem" \
+            --keep-booted
 
       - name: Run five UI methods across three simulators
         run: |
           bazel test //tests/integration:MethodShardedUITests \
             --test_output=errors \
+            --test_env=DEBUG_XCTESTRUNNER=1 \
             --local_resources=ios_simulator=3 \
             --@rules_apple//apple/build_settings:ios_simulator_device="$SIMFLEET_DEVICE_TYPE" \
             --@rules_apple//apple/build_settings:ios_simulator_version="$SIMFLEET_OS_VERSION"
