@@ -1,35 +1,107 @@
 # rules_simfleet
 
-`rules_simfleet` is a small companion to
-[`rules_apple`](https://github.com/bazelbuild/rules_apple) that runs one iOS UI
-test target on a local fleet of simulators. It supports both Xcode's normal
-class-level distribution and true method-level sharding.
+**True method-level iOS UI test parallelism for Bazel—on simulators you own.**
 
-It is designed for teams that use remote caching, but do not have macOS remote
-execution. Compilation and bundle assembly can still come from the remote
-cache; a cache miss fans out locally through Bazel shards or Xcode workers.
+[![Bazel 9.2](https://img.shields.io/badge/Bazel-9.2-43A047?logo=bazel)](https://bazel.build/)
+[![rules_apple 5](https://img.shields.io/badge/rules__apple-5.0.0--rc2-147EFB?logo=apple)](https://github.com/bazelbuild/rules_apple)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20iOS-lightgrey?logo=apple)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-The initial implementation is intentionally thin. `rules_apple` already:
+[Quick start](#quick-start) · [Prepared pools](#prepared-simulator-pools) ·
+[Reliability](#robust-concurrent-leasing) · [GitHub Actions](#github-actions) ·
+[Architecture](docs/design.md)
 
-- produces an `.xctestrun` file for UI tests;
-- accepts additional `xcodebuild` arguments on `ios_xctestrun_runner`; and
-- recognizes parallel-XCTest logs.
+`rules_simfleet` is a companion to
+[`rules_apple`](https://github.com/bazelbuild/rules_apple) for teams that build
+with a remote cache but execute UI tests on local macOS machines. It can split
+methods from the same `XCTestCase` across several simulators, manage a stable
+pool of preconfigured devices, and prevent concurrent Bazel actions from
+claiming the same simulator.
 
-`rules_simfleet` supplies the missing policy and method-aware runner:
+```text
+One XCTestCase · Five test methods · Three simulators · One Bazel target
+```
 
-- enable Xcode parallel testing;
-- request an exact Xcode worker count in class-distribution mode;
-- reserve the same number of Bazel `ios_simulator` resources;
-- force local execution without disabling remote cache access; and
-- reject Bazel-level sharding, which would otherwise run every test repeatedly
-  and could create `shard_count * worker_count` simulators; or
-- deliberately enable Bazel sharding with an exact method manifest, converting
-  each shard index into a `TESTBRIDGE_TEST_ONLY` filter.
+## The problem
 
-## Use it
+Xcode's native parallel runner is useful when a bundle has many independent
+test classes. A bundle containing one large UI test class can still leave most
+simulators idle.
 
-For a local checkout of this repository, add it to the consuming workspace's
-module graph:
+```mermaid
+flowchart LR
+    Target["ios_ui_test<br/>CheckoutUITests"] --> Xcode["Xcode parallel testing"]
+    Xcode --> S1["Simulator 1<br/>CheckoutUITests<br/>all 5 methods"]
+    Xcode -. "idle" .-> S2["Simulator 2"]
+    Xcode -. "idle" .-> S3["Simulator 3"]
+
+    classDef active fill:#dbeafe,stroke:#2563eb,color:#172554
+    classDef idle fill:#f3f4f6,stroke:#9ca3af,color:#6b7280,stroke-dasharray:5 5
+    class Target,Xcode,S1 active
+    class S2,S3 idle
+```
+
+Setting Bazel's `shard_count = 3` directly does not fix this in
+`rules_apple`: the default runner does not partition the test list by
+`TEST_SHARD_INDEX`, so each shard can run the entire suite.
+
+## What SimFleet changes
+
+SimFleet creates a static method manifest, enables real Bazel sharding, and
+turns each shard index into an exact `TESTBRIDGE_TEST_ONLY` filter before the
+upstream `ios_xctestrun_runner` starts.
+
+```mermaid
+flowchart LR
+    Build["Build app + test bundle<br/>remote-cache eligible"] --> Manifest["SimFleet method manifest"]
+    Manifest --> B0["Bazel shard 0<br/>testAddItem<br/>testDeclinedCard"]
+    Manifest --> B1["Bazel shard 1<br/>testRemoveItem<br/>testSuccessfulPurchase"]
+    Manifest --> B2["Bazel shard 2<br/>testApplyCoupon"]
+    B0 --> D1["simfleet_simulator_1"]
+    B1 --> D2["simfleet_simulator_2"]
+    B2 --> D3["simfleet_simulator_3"]
+
+    classDef build fill:#fef3c7,stroke:#d97706,color:#451a03
+    classDef shard fill:#dcfce7,stroke:#16a34a,color:#052e16
+    classDef device fill:#dbeafe,stroke:#2563eb,color:#172554
+    class Build,Manifest build
+    class B0,B1,B2 shard
+    class D1,D2,D3 device
+```
+
+For five methods and three simulators, stable round-robin assignment produces:
+
+| Simulator | Exact XCTest filter |
+| --- | --- |
+| `simfleet_simulator_1` | `testAddItem`, `testDeclinedCard` |
+| `simfleet_simulator_2` | `testRemoveItem`, `testSuccessfulPurchase` |
+| `simfleet_simulator_3` | `testApplyCoupon` |
+
+All three rows execute concurrently even though every method belongs to the
+same class.
+
+## Why use it
+
+| Capability | Native Xcode distribution | Naive Bazel `shard_count` | SimFleet method sharding |
+| --- | --- | --- | --- |
+| Parallelizes one large test class | Limited | No—repeats the suite | Yes—exact method filters |
+| Builds one app/test bundle graph | Yes | Yes | Yes |
+| Works with Bazel remote cache | Yes | Yes | Yes |
+| Prevents simulator oversubscription | Outside Bazel's view | No | Bazel custom resources |
+| Supports persistent certificate-ready devices | No first-class pool | No | Yes |
+| Avoids two actions sharing one device | Xcode-managed clones | Not guaranteed | Atomic per-UDID leases |
+| Recovers after cancellation | Xcode-managed | Runner-dependent | Dead-owner lease reclamation |
+
+SimFleet stays deliberately small: `rules_apple` still builds the bundles,
+creates the `.xctestrun`, launches `xcodebuild`, and processes the result. This
+project only adds scheduling, filtering, resource accounting, and prepared
+device lifecycle policy.
+
+## Quick start
+
+### 1. Add the module
+
+Until the module is published, point Bzlmod at a local checkout:
 
 ```starlark
 bazel_dep(name = "rules_apple", version = "5.0.0-rc2")
@@ -37,11 +109,11 @@ bazel_dep(name = "rules_simfleet", version = "0.1.0")
 
 local_path_override(
     module_name = "rules_simfleet",
-    path = "../simulator_management",
+    path = "../rules_simfleet",
 )
 ```
 
-Then load the method-sharding macro:
+### 2. Declare every UI test method
 
 ```starlark
 load("@rules_simfleet//simfleet:defs.bzl", "ios_method_sharded_ui_test")
@@ -62,41 +134,37 @@ ios_method_sharded_ui_test(
 )
 ```
 
-Even though all five methods belong to one `XCTestCase`, the resulting Bazel
-shards are:
+The manifest is authoritative. A method omitted from `test_identifiers` is not
+run. SimFleet owns `test_filter`, `runner`, and `shard_count`, so callers must
+not set those separately.
 
-```text
-shard 0 / simulator 0: testAddItem, testDeclinedCard
-shard 1 / simulator 1: testRemoveItem, testSuccessfulPurchase
-shard 2 / simulator 2: testApplyCoupon
-```
+### 3. Give Bazel simulator capacity
 
-Every shard receives an exact method filter before the upstream
-`ios_xctestrun_runner` starts. The test bundle is still assembled once.
-
-Tell Bazel how many simulator slots the machine has. Each method shard reserves
-one slot:
+Each method shard requests one `ios_simulator` resource. Configure the total
+capacity of the machine in `.bazelrc`:
 
 ```bazelrc
-test --local_resources=ios_simulator=3
+build --local_resources=ios_simulator=3
 ```
 
-Run it like an ordinary test:
+This is a `build` option because tags can propagate to generated Apple bundle
+actions as well as the final test action.
+
+### 4. Run the target
 
 ```shell
 bazel test //app:CheckoutUITests --cache_test_results=yes
 ```
 
-The method manifest must be complete: methods omitted from `test_identifiers`
-will not run. Do not combine this macro with a rule-level or command-line
-`test_filter`; SimFleet owns the per-shard filter.
+With a remote cache hit, Bazel can reuse compilation and bundle assembly. Test
+execution remains local because SimFleet adds `no-remote-exec`, without adding
+the stronger `local` requirement that would disable caching.
 
-## Configuration
+## Prepared simulator pools
 
-### Persistent prepared simulators
-
-Some environments install corporate or debugging proxy root certificates in
-the simulator keychain. Prepare a persistent named pool once:
+Temporary simulators are a poor fit for corporate proxies, private certificate
+authorities, MDM-like setup, or expensive one-time device configuration.
+Prepare stable devices once and reuse them across test runs:
 
 ```shell
 bazel run @rules_simfleet//simfleet:prepare_simulators -- \
@@ -108,13 +176,31 @@ bazel run @rules_simfleet//simfleet:prepare_simulators -- \
   --certificate "$HOME/certs/corporate-proxy-root.pem"
 ```
 
-`--certificate` may be repeated. Preparation is non-destructive: devices named
-`simfleet_simulator_1`, `simfleet_simulator_2`, and so on are created when
-missing and reused when present. SimFleet boots each device, installs the certificates with
-`simctl keychain add-root-cert`, then shuts it down unless `--keep-booted` is
-passed. It never erases or deletes prepared devices.
+`--certificate` may be repeated. Preparation creates or reuses
+`simfleet_simulator_1`, `simfleet_simulator_2`, and so on, boots each device,
+installs the roots with `simctl keychain add-root-cert`, and shuts it down
+unless `--keep-booted` is set. It never implicitly erases or deletes a device.
 
-Select that pool from the test:
+```mermaid
+sequenceDiagram
+    participant P as prepare_simulators
+    participant C as CoreSimulator
+    participant K as Simulator keychain
+
+    loop For device 1…N
+        P->>C: Find stable device by name
+        alt Device is missing
+            P->>C: Create simfleet_simulator_N
+        else Device already exists
+            C-->>P: Reuse existing UDID
+        end
+        P->>C: Boot and wait until ready
+        P->>K: Install each root certificate
+        P->>C: Shut down unless --keep-booted
+    end
+```
+
+Select the pool from the test target:
 
 ```starlark
 ios_method_sharded_ui_test(
@@ -128,13 +214,8 @@ ios_method_sharded_ui_test(
 )
 ```
 
-Each Bazel shard takes an atomic machine-wide, per-UDID lease on one of the first three
-prepared devices. The simulator is released—not deleted or erased—after the
-test. Stale leases from killed test runners are reclaimed automatically.
-
-`device_type` and `os_version` can be declared on the macro or supplied with
-the standard `rules_apple` build settings. The latter is useful on CI images
-whose newest installed simulator changes over time:
+The device type and OS can be set on the macro or supplied dynamically through
+the standard `rules_apple` build settings:
 
 ```shell
 bazel test //app:CheckoutUITests \
@@ -142,74 +223,104 @@ bazel test //app:CheckoutUITests \
   --@rules_apple//apple/build_settings:ios_simulator_version="18.5"
 ```
 
-Certificate installation establishes trust; configuring the Mac's proxy or
-the simulator's network route remains environment-specific.
+Certificate installation establishes trust. Configuring the host proxy or the
+simulator's network route remains environment-specific.
 
-### Shard balancing
+## Robust concurrent leasing
+
+Every shard acquires an atomic, machine-wide lease before booting a prepared
+device. Cleanup releases the lease but preserves the simulator and its
+keychain.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Available
+    Available --> Leased: atomic flock + owner record
+    Leased --> Booted: simctl boot + bootstatus
+    Booted --> Testing: xcodebuild test-without-building
+    Testing --> Available: normal cleanup releases lease
+    Leased --> Available: owner PID is dead
+    Booted --> Available: stale lease timeout
+```
+
+Leases are global per UDID, not merely per logical pool name. A second Bazel
+process therefore cannot take the same simulator through a differently named
+pool. Owner records use the parent test-runner PID, allowing abandoned leases
+to be reclaimed after cancellations or crashes.
+
+## Balancing slow methods
+
+Without timing data, assignment is deterministic round-robin. With
+`estimated_durations`, SimFleet schedules the longest methods first onto the
+currently lightest shard:
 
 ```starlark
 ios_method_sharded_ui_test(
     name = "CheckoutUITests",
-    test_identifiers = [
-        "CheckoutUITests/testAddItem",
-        "CheckoutUITests/testRemoveItem",
-        "CheckoutUITests/testApplyCoupon",
-        "CheckoutUITests/testDeclinedCard",
-        "CheckoutUITests/testSuccessfulPurchase",
-    ],
+    test_identifiers = CHECKOUT_UI_TESTS,
     simulator_count = 3,
     estimated_durations = {
         "CheckoutUITests/testApplyCoupon": 18,
         "CheckoutUITests/testDeclinedCard": 7,
         "CheckoutUITests/testSuccessfulPurchase": 24,
     },
-    device_type = "iPhone 16 Pro",
-    os_version = "18.2",
     create_xcresult_bundle = True,
-    extra_xcodebuild_args = [
-        "-test-timeouts-enabled",
-        "YES",
-    ],
     minimum_os_version = "18.0",
     test_host = ":CheckoutApp",
     deps = [":CheckoutUITestsLib"],
 )
 ```
 
-When durations are supplied, SimFleet uses longest-processing-time scheduling
-to balance the shard totals. Unlisted methods have an estimate of zero. Without
-durations it uses stable round-robin assignment.
+Unlisted methods receive an estimate of zero. Estimates only affect placement;
+they are not timeouts.
 
-Without `prepared_simulator_pool`, each shard receives a unique temporary
-simulator because the upstream reusable simulator is not concurrency-safe.
-`rules_apple` deletes those temporary devices when the shards finish.
+## Two execution modes
 
-The original `ios_parallel_ui_test` macro remains available for bundles that
-already have enough independent test classes and prefer Xcode-managed clones.
+| Mode | Macro | Best for |
+| --- | --- | --- |
+| Method-sharded | `ios_method_sharded_ui_test` | One or a few large test classes; exact Bazel-visible partitions |
+| Xcode-managed | `ios_parallel_ui_test` | Many independent classes; Xcode-managed clone lifecycle |
 
-## GitHub Actions PR checks
+Method-sharded mode uses unique temporary devices when no prepared pool is
+selected. The upstream `rules_apple` cleanup removes those devices. Prepared
+mode instead leases stable devices and preserves their state.
+
+## GitHub Actions
 
 The checked-in [CI workflow](.github/workflows/ci.yml) runs on pull requests,
-pushes to `main`, and manual dispatches. It has two required-check-friendly
-jobs:
+pushes to `main`, and manual dispatches:
 
-- `Unit and analysis checks` runs the Python tests and analyzes the complete
-  iOS integration target.
-- `UI methods on 3 prepared simulators` discovers the newest installed iOS
-  runtime and iPhone model, generates a one-day test root certificate, prepares
-  `simfleet_simulator_1` through `simfleet_simulator_3`, and runs the five
-  methods in one XCTest class across three Bazel shards.
+```mermaid
+flowchart LR
+    PR["Pull request"] --> Unit["Unit + analysis checks"]
+    Unit --> Cache["Save Bazel disk/repository cache"]
+    Cache --> Mac["macOS UI integration job"]
+    Mac --> Select["Discover installed iOS runtime"]
+    Select --> Prepare["Prepare 3 simulators + test CA"]
+    Prepare --> Test["Run 5 methods over 3 shards"]
+    Test -->|failure| Artifacts["Upload Bazel logs + XCResult"]
+    Test -->|success| Pass["Required check passes"]
+```
 
-The UI job starts after the unit job and restores the same Bazel disk and
-repository caches, so compilation is reused while simulator execution remains
-local to the second Mac.
+No repository secret is required, so forked pull requests can run the checks.
+The UI job restores the cache produced by the unit job, while simulator
+execution stays local to its Mac runner.
 
-No repository secret is required, so the workflow is safe to run for forked
-pull requests. Failed UI runs upload `bazel-testlogs` for seven days.
+The default label is `macos-15`. To use a larger or self-hosted machine, create
+the repository Actions variable `SIMFLEET_MACOS_RUNNER` with the desired runner
+label. For four or five concurrent simulators, a larger runner is strongly
+recommended.
 
-The default runner is `macos-15`. To use a larger or self-hosted macOS runner,
-create the repository Actions variable `SIMFLEET_MACOS_RUNNER` containing its
-runner label; the workflow uses that label without requiring a source change.
+## Guarantees and boundaries
 
-See [the design notes](docs/design.md) for the `rules_apple` findings, cache
-model, constraints, and possible next steps.
+- Exactly the declared method identifiers are distributed.
+- A shard never silently runs the full suite.
+- Simulator demand is visible to Bazel's local resource manager.
+- Prepared devices are never implicitly erased or deleted.
+- Stale leases are recoverable after terminated test runners.
+- All shards use the same device type and iOS runtime.
+- Application data persists on prepared devices; tests remain responsible for
+  resetting their own state.
+
+See [the architecture and design notes](docs/design.md) for runner composition,
+cache boundaries, lease ownership, failure behavior, and rejected alternatives.
