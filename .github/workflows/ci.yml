@@ -15,7 +15,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+  DEVELOPER_DIR: /Applications/Xcode_26.1.1.app/Contents/Developer
+  SIMFLEET_DEVICE_TYPE: iPhone 17
+  SIMFLEET_OS_VERSION: "26.1"
 
 jobs:
   unit:
@@ -24,15 +26,24 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      - name: Select and verify Xcode 26.1.1
+        run: |
+          test -d "$DEVELOPER_DIR"
+          sudo xcode-select --switch "$DEVELOPER_DIR"
+          xcode_version="$(xcodebuild -version | sed -n '1s/^Xcode //p')"
+          simulator_sdk="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          echo "Using Xcode $xcode_version with iOS Simulator SDK $simulator_sdk"
+          test "$xcode_version" = "26.1.1"
+          test "$simulator_sdk" = "$SIMFLEET_OS_VERSION"
       - uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
           disk-cache: ${{ github.workflow }}
           repository-cache: true
       - name: Run unit tests
-        run: bazel test //simfleet:simulator_pool_test
+        run: bazel test --config=ci //simfleet:simulator_pool_test
       - name: Analyze the integration target
-        run: bazel build //tests/integration:MethodShardedUITests
+        run: bazel build --config=ci //tests/integration:MethodShardedUITests
 
   ui-integration:
     name: UI methods on 3 prepared simulators
@@ -41,20 +52,28 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - name: Select and verify Xcode 26.1.1
+        run: |
+          test -d "$DEVELOPER_DIR"
+          sudo xcode-select --switch "$DEVELOPER_DIR"
+          xcode_version="$(xcodebuild -version | sed -n '1s/^Xcode //p')"
+          simulator_sdk="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          echo "Using Xcode $xcode_version with iOS Simulator SDK $simulator_sdk"
+          test "$xcode_version" = "26.1.1"
+          test "$simulator_sdk" = "$SIMFLEET_OS_VERSION"
+          xcrun simctl list runtimes --json | jq -e \
+            --arg version "$SIMFLEET_OS_VERSION" \
+            '.runtimes[] | select(.platform == "iOS" and .version == $version and .isAvailable == true)' \
+            >/dev/null
+          xcrun simctl list devicetypes --json | jq -e \
+            --arg name "$SIMFLEET_DEVICE_TYPE" \
+            '.devicetypes[] | select(.name == $name)' \
+            >/dev/null
       - uses: bazel-contrib/setup-bazel@0.19.0
         with:
           bazelisk-cache: true
           disk-cache: ${{ github.workflow }}
           repository-cache: true
-
-      - name: Select the newest installed iOS destination
-        run: |
-          selection="$(bazel run //simfleet:select_simulator)"
-          device_type="$(jq -r .device_type <<< "$selection")"
-          os_version="$(jq -r .os_version <<< "$selection")"
-          echo "SIMFLEET_DEVICE_TYPE=$device_type" >> "$GITHUB_ENV"
-          echo "SIMFLEET_OS_VERSION=$os_version" >> "$GITHUB_ENV"
-          echo "Using $device_type on iOS $os_version"
 
       - name: Generate a CI proxy root certificate
         run: |
@@ -65,7 +84,7 @@ jobs:
 
       - name: Prepare three stable certificate-ready simulators
         run: |
-          bazel run //simfleet:prepare_simulators -- \
+          bazel run --config=ci //simfleet:prepare_simulators -- \
             --pool github-ci \
             --count 3 \
             --device-type "$SIMFLEET_DEVICE_TYPE" \
@@ -75,7 +94,7 @@ jobs:
 
       - name: Run five UI methods across three simulators
         run: |
-          bazel test //tests/integration:MethodShardedUITests \
+          bazel test --config=ci //tests/integration:MethodShardedUITests \
             --test_output=errors \
             --test_env=DEBUG_XCTESTRUNNER=1 \
             --local_resources=ios_simulator=3 \

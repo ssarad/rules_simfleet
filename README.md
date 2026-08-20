@@ -311,6 +311,16 @@ boot every simulator to install the test certificate, shut each one down, and
 immediately cold-boot the whole fleet again inside the Bazel shards. Avoiding
 that redundant cycle is important for modern iOS runtimes on hosted Macs.
 
+CI also opts into local spawn and test strategies through `--config=ci`:
+
+```bazelrc
+build:ci --spawn_strategy=local
+test:ci --test_strategy=standalone
+```
+
+This avoids the high `sandbox-exec` overhead of Xcode and CoreSimulator on
+hosted macOS while leaving sandboxing enabled for normal developer builds.
+
 The default label is `macos-15`. To use a larger or self-hosted machine, create
 the repository Actions variable `SIMFLEET_MACOS_RUNNER` with the desired runner
 label. For four or five concurrent simulators, a larger runner is strongly
