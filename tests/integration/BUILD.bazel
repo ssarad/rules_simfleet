@@ -30,6 +30,7 @@ ios_application(
 # target explicitly in its simulator integration job.
 ios_method_sharded_ui_test(
     name = "MethodShardedUITests",
+    timeout = "long",
     create_xcresult_bundle = True,
     minimum_os_version = "17.0",
     prepared_simulator_pool = "github-ci",

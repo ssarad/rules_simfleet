@@ -3,4 +3,10 @@ build --local_resources=ios_simulator=3
 test --build_tests_only
 test --test_env=PATH
 
+# CoreSimulator and Xcode are substantially slower behind macOS sandbox-exec.
+# Keep this opt-in so ordinary local builds retain Bazel's hermetic sandbox.
+build:ci --spawn_strategy=local
+build:ci --xcode_version=26.1.1
+test:ci --test_strategy=standalone
+
 try-import %workspace%/user.bazelrc
