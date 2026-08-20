@@ -1,0 +1,50 @@
+load("@rules_apple//apple:ios.bzl", "ios_application")
+load("@rules_cc//cc:objc_library.bzl", "objc_library")
+load("//simfleet:defs.bzl", "ios_method_sharded_ui_test")
+
+package(default_visibility = ["//visibility:private"])
+
+objc_library(
+    name = "app_lib",
+    srcs = ["AppDelegate.m"],
+    sdk_frameworks = ["UIKit"],
+)
+
+objc_library(
+    name = "ui_test_lib",
+    testonly = True,
+    srcs = ["SimFleetUITests.m"],
+)
+
+ios_application(
+    name = "TestHost",
+    bundle_id = "dev.rules-simfleet.integration-test-host",
+    families = ["iphone"],
+    infoplists = ["Info.plist"],
+    minimum_os_version = "17.0",
+    deps = [":app_lib"],
+)
+
+# One XCTestCase, five methods, and three Bazel shards. This is deliberately
+# manual so `bazel test //...` remains a fast unit-test command; CI names this
+# target explicitly in its simulator integration job.
+ios_method_sharded_ui_test(
+    name = "MethodShardedUITests",
+    create_xcresult_bundle = True,
+    minimum_os_version = "17.0",
+    prepared_simulator_pool = "github-ci",
+    simulator_count = 3,
+    tags = [
+        "integration",
+        "manual",
+    ],
+    test_host = ":TestHost",
+    test_identifiers = [
+        "SimFleetUITests/testMethodOne",
+        "SimFleetUITests/testMethodTwo",
+        "SimFleetUITests/testMethodThree",
+        "SimFleetUITests/testMethodFour",
+        "SimFleetUITests/testMethodFive",
+    ],
+    deps = [":ui_test_lib"],
+)

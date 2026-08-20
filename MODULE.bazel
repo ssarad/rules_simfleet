@@ -1,0 +1,10 @@
+module(
+    name = "rules_simfleet",
+    version = "0.1.0",
+)
+
+# Keep CI and fresh GitHub checkouts reproducible. rules_apple 5 is required
+# because SimFleet composes the public ios_xctestrun_runner API.
+bazel_dep(name = "rules_apple", version = "5.0.0-rc2")
+bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "rules_python", version = "1.7.0")

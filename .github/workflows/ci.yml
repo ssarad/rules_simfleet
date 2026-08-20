@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+
+jobs:
+  unit:
+    name: Unit and analysis checks
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+      - name: Run unit tests
+        run: bazel test //simfleet:simulator_pool_test
+      - name: Analyze the integration target
+        run: bazel build //tests/integration:MethodShardedUITests
+
+  ui-integration:
+    name: UI methods on 3 prepared simulators
+    needs: unit
+    runs-on: ${{ vars.SIMFLEET_MACOS_RUNNER || 'macos-15' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+
+      - name: Select the newest installed iOS destination
+        run: |
+          selection="$(bazel run //simfleet:select_simulator)"
+          device_type="$(jq -r .device_type <<< "$selection")"
+          os_version="$(jq -r .os_version <<< "$selection")"
+          echo "SIMFLEET_DEVICE_TYPE=$device_type" >> "$GITHUB_ENV"
+          echo "SIMFLEET_OS_VERSION=$os_version" >> "$GITHUB_ENV"
+          echo "Using $device_type on iOS $os_version"
+
+      - name: Generate a CI proxy root certificate
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 \
+            -subj "/CN=SimFleet GitHub CI Root" \
+            -keyout "$RUNNER_TEMP/simfleet-ci-root.key" \
+            -out "$RUNNER_TEMP/simfleet-ci-root.pem"
+
+      - name: Prepare three stable certificate-ready simulators
+        run: |
+          bazel run //simfleet:prepare_simulators -- \
+            --pool github-ci \
+            --count 3 \
+            --device-type "$SIMFLEET_DEVICE_TYPE" \
+            --os-version "$SIMFLEET_OS_VERSION" \
+            --certificate "$RUNNER_TEMP/simfleet-ci-root.pem"
+
+      - name: Run five UI methods across three simulators
+        run: |
+          bazel test //tests/integration:MethodShardedUITests \
+            --test_output=errors \
+            --local_resources=ios_simulator=3 \
+            --@rules_apple//apple/build_settings:ios_simulator_device="$SIMFLEET_DEVICE_TYPE" \
+            --@rules_apple//apple/build_settings:ios_simulator_version="$SIMFLEET_OS_VERSION"
+
+      - name: Show prepared simulator state
+        if: always()
+        run: xcrun simctl list devices | grep -A 4 -B 1 simfleet_simulator || true
+
+      - name: Upload UI test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-test-logs-${{ github.run_id }}
+          path: bazel-testlogs/tests/integration/MethodShardedUITests/
+          if-no-files-found: warn
+          retention-days: 7

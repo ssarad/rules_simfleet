@@ -1,0 +1,40 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["defs.bzl"])
+
+py_library(
+    name = "simulator_pool_lib",
+    srcs = ["simulator_pool.py"],
+)
+
+py_binary(
+    name = "prepare_simulators",
+    srcs = ["prepare_simulators.py"],
+    deps = [":simulator_pool_lib"],
+)
+
+py_binary(
+    name = "select_simulator",
+    srcs = ["select_simulator.py"],
+    deps = [":simulator_pool_lib"],
+)
+
+py_binary(
+    name = "acquire_simulator",
+    srcs = ["acquire_simulator.py"],
+    deps = [":simulator_pool_lib"],
+)
+
+py_binary(
+    name = "release_simulator",
+    srcs = ["release_simulator.py"],
+    deps = [":simulator_pool_lib"],
+)
+
+py_test(
+    name = "simulator_pool_test",
+    srcs = ["simulator_pool_test.py"],
+    deps = [":simulator_pool_lib"],
+)
